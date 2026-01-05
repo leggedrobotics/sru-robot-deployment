@@ -3,9 +3,9 @@
 <package format="3">
   <name>b2w_sim_worlds</name>
   <version>0.1.0</version>
-  <description>Collection of BLK-captured Gazebo world files from the Autonomous Digital Twin project</description>
-  <maintainer email="areske@ethz.ch">Alexander Reske</maintainer>
-  <license>Proprietary</license>
+  <description>Mesh World for B2W simulation</description>
+  <maintainer email="fanyang1@ethz.ch">Fan Yang</maintainer>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

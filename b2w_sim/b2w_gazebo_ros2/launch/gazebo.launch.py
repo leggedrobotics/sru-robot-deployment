@@ -125,7 +125,7 @@ def generate_launch_description():
 
     # ros_gz_bridge config
     ros_gz_bridge_config = PathJoinSubstitution([
-        FindPackageShare("b2w_gazebo"), "config", "b2w_gz_bridge.yaml"
+        FindPackageShare("b2w_gazebo_ros2"), "config", "b2w_gz_bridge.yaml"
     ])
 
     ros_gz_bridge = IncludeLaunchDescription(

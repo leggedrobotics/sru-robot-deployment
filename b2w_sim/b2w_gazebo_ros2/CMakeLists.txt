@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(b2w_gazebo)
+project(b2w_gazebo_ros2)
 
 # Set C++ standard (optional if no C++ code)
 set(CMAKE_CXX_STANDARD 17)
@@ -18,6 +18,6 @@ ament_package()
 
 # Install launch/config/world files
 install(
-  DIRECTORY launch config worlds rviz
+  DIRECTORY launch config worlds
   DESTINATION share/${PROJECT_NAME}
 )

@@ -4,8 +4,8 @@
   <name>b2w_collision_monitor</name>
   <version>0.0.1</version>
   <description>B2W collision detection node for force-torque and pointcloud-based collision monitoring.</description>
-  <maintainer email="your_email@example.com">your_name</maintainer>
-  <license>Apache License 2.0</license>
+  <maintainer email="fanyang1@ethz.ch">Fan Yang</maintainer>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

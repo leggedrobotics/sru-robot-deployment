@@ -1,12 +1,11 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>b2w_gazebo</name>
+  <name>b2w_gazebo_ros2</name>
   <version>0.1.0</version>
   <description>Gazebo simulation for b2w</description>
-  <maintainer email="koen.kraemer@mavt.ethz.ch">Koen Kraemer</maintainer>
-  <license>Proprietary</license>
-  <url type="website">https://bitbucket.org/leggedrobotics/b2w_common</url>
+  <maintainer email="per.a.frivik@gmail.com">perfrivik</maintainer>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

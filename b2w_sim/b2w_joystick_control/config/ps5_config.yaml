@@ -1,0 +1,29 @@
+/**:
+  ros__parameters:
+    # PS5 Controller Axis Mapping
+    # Left Stick: axis 0 (left/right), axis 1 (up/down)
+    # Right Stick: axis 2 (left/right), axis 5 (up/down)
+    # L2 Trigger: axis 3
+    # R2 Trigger: axis 4
+
+    axis_linear_x: 1      # Left stick up/down (forward/backward)
+    axis_linear_y: 0      # Left stick left/right (strafe)
+    axis_angular_z: 3     # Right stick left/right (rotation)
+
+    # PS5 Button Mapping
+    # Cross: 0, Circle: 1, Square: 2, Triangle: 3
+    # L1: 4, R1: 5, L2: 6, R2: 7
+    # Share: 8, Options: 9, PS: 10
+    # L3: 11, R3: 12
+
+    enable_button: 4      # L1 - Hold to enable movement
+    turbo_button: 5       # R1 - Hold for turbo speed
+
+    # Velocity scaling (m/s and rad/s)
+    scale_linear: 1.0         # Normal forward/strafe speed
+    scale_linear_turbo: 1.5   # Turbo forward/strafe speed
+    scale_angular: 0.75        # Normal rotation speed
+    scale_angular_turbo: 1.0  # Turbo rotation speed
+
+    # Deadzone threshold (0.0 to 1.0)
+    deadzone: 0.15

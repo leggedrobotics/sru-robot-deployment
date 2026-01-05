@@ -60,7 +60,7 @@ def generate_launch_description():
     gazebo_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
-                FindPackageShare("b2w_gazebo"),
+                FindPackageShare("b2w_gazebo_ros2"),
                 "launch",
                 "gazebo.launch.py"
             ])
@@ -141,11 +141,6 @@ def generate_launch_description():
         executable="rviz2",
         name="rviz2",
         output="screen",
-        arguments=["-d", PathJoinSubstitution([
-            FindPackageShare("b2w_gazebo"),
-            "rviz",
-            "demo.rviz"
-        ])],
         parameters=[{"use_sim_time": True}],
         condition=IfCondition(enable_rviz),
     )
