@@ -66,7 +66,9 @@ devel/
 # ONNX Runtime (bundled in third_party)
 # But ignore downloaded/system versions
 /onnxruntime/
-!b2w_controllers/third_party/onnxruntime/
+!b2w_sim/b2w_controllers/third_party/onnxruntime/
+!b2w_sim/b2w_controllers/third_party/onnxruntime/**/*.so
+!b2w_sim/b2w_controllers/third_party/onnxruntime/**/*.so.*
 
 # Gazebo
 .gazebo/
