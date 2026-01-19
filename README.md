@@ -52,16 +52,12 @@ The `rl_nav_controller` package loads and deploys the trained **Spatially-enhanc
 git clone <repo-url> ~/sru_ws/src/sru-robot-deployment
 cd ~/sru_ws/src/sru-robot-deployment
 
-# Setup Python environment (for RL navigation)
-# This creates a virtual environment in ~/ros2_torch (not in this folder to avoid colcon build issues)
-bash setup_ros2_torch.sh
+# Install Python dependencies for RL navigation
+pip install numpy scipy opencv-python onnxruntime  # or onnxruntime-gpu for CUDA
 
 # Build
 cd ~/sru_ws
-# Note: Build WITHOUT --symlink-install for rl_nav_controller to work with venv
-colcon build --packages-select rl_nav_controller --cmake-args -DCMAKE_BUILD_TYPE=Release
-# Other packages can use --symlink-install
-colcon build --packages-skip rl_nav_controller --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ```
 
@@ -75,8 +71,7 @@ source install/setup.bash
 # Terminal 1: Launch full B2W simulation with controller
 ros2 launch b2w_gazebo_ros2 b2w_gazebo.launch.py enable_rviz:=true
 
-# Terminal 2: Launch navigation controller (loads SRU network)
-source ~/ros2_torch/bin/activate
+# Terminal 2: Launch navigation controller (loads SRU network via ONNX Runtime)
 ros2 launch rl_nav_controller rl_nav_controller.launch.py sim:=true
 ```
 
@@ -94,9 +89,8 @@ ros2 launch b2w_joystick_control joystick_teleop.launch.py
 
 **Prerequisites:**
 ```bash
-# First-time setup: Create Python virtual environment with PyTorch
-cd ~/sru_ws/src/sru-robot-deployment
-bash setup_ros2_torch.sh
+# Install Python dependencies
+pip install numpy scipy opencv-python onnxruntime  # or onnxruntime-gpu for CUDA
 ```
 
 **Choose one control mode:**
@@ -107,8 +101,7 @@ bash setup_ros2_torch.sh
 # Terminal 1: Launch real robot (requires hardware setup)
 ros2 launch b2w_gazebo_ros2 b2w_gazebo.launch.py  # Adjust for real hardware
 
-# Terminal 2: Activate Python environment and launch navigation controller
-source ~/ros2_torch/bin/activate
+# Terminal 2: Launch navigation controller
 ros2 launch rl_nav_controller rl_nav_controller.launch.py
 
 # Terminal 3: Send navigation goal (choose one method)
@@ -267,7 +260,7 @@ Edit [b2w_joystick_control/config/ps5_config.yaml](b2w_sim/b2w_joystick_control/
 - All nodes must have `use_sim_time: true`
 
 **Navigation policy runs slowly:**
-- Verify GPU: `python -c "import torch; print(torch.cuda.is_available())"`
+- Verify GPU: `python -c "import onnxruntime as ort; print(ort.get_available_providers())"`
 - Check depth input rate: `ros2 topic hz /zed/zed_node/depth/depth_registered`
 
 **Robot doesn't move:**
@@ -290,7 +283,7 @@ See individual module READMEs for more troubleshooting guidance.
 
 - **ROS 2 Jazzy** (or compatible)
 - **Gazebo Harmonic** (simulation only)
-- **Python 3.10+** with PyTorch CUDA support
+- **Python 3.10+** with ONNX Runtime
 - **ZedX Camera** (hardware deployment only)
 
 ## License

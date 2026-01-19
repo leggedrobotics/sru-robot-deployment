@@ -11,12 +11,13 @@ This repository provides the **learned navigation policy controller** that enabl
 
 **Scope of this repository:**
 
-- ✅ PyTorch-based navigation policy with depth preprocessing (VAE)
+- ✅ ONNX Runtime-based navigation policy with depth preprocessing (VAE)
 - ✅ ROS 2 integration with real-time inference at 5 Hz
 - ✅ Multi-modal control: autonomous, smart joystick, waypoint playback
 - ✅ Real-time visualization markers for debugging (RViz2)
 - ✅ Hardware/simulation compatibility with unified interface
 - ✅ Joystick integration for teleoperation and goal setting
+- ✅ **No PyTorch dependency at runtime** - lightweight deployment
 
 **Not included in this repository:**
 
@@ -39,18 +40,21 @@ For the **complete navigation system** and **simulation environment**, please re
 ```
 rl_nav_controller/
 ├── rl_nav_controller/
-│   ├── rl_nav_controller.py    # Main navigation node (916 lines)
-│   ├── utils.py                # Geometric transforms (281 lines)
-│   ├── constants.py            # Configuration parameters (61 lines)
-│   ├── visualization.py        # RViz marker management (189 lines)
-│   └── waypoint_manager.py     # Waypoint recording/playback (165 lines)
+│   ├── rl_nav_controller.py    # Main navigation node (ONNX Runtime)
+│   ├── utils.py                # Geometric transforms (NumPy-based)
+│   ├── constants.py            # Configuration parameters
+│   ├── visualization.py        # RViz marker management
+│   └── waypoint_manager.py     # Waypoint recording/playback
 │
 ├── launch/
 │   └── rl_nav_controller.launch.py  # Launch with sim/hardware modes
 │
 ├── deployment_policies/
-│   ├── vae_pretrain_new_jit.pt           # Depth encoder (40×64 latent)
-│   └── nav_policy_new_encoder_gamma.pt  # Navigation policy (SRU-based)
+│   ├── vae_encoder.onnx        # Depth encoder (ONNX format)
+│   └── nav_policy.onnx         # Navigation policy (ONNX format)
+│
+├── scripts/
+│   └── test_onnx_inference.py  # Test script for verifying ONNX models
 │
 └── package.xml / setup.py      # ROS 2 package configuration
 ```
@@ -60,49 +64,45 @@ rl_nav_controller/
 ### Prerequisites
 
 - **ROS 2 Jazzy** (or compatible distribution)
-- **Python 3.10+** with PyTorch support
+- **Python 3.10+**
 - **ZedX Camera** (for hardware deployment)
 - **DLIO Localization** system (odometry provider)
 
-### Python Environment Setup
+### Step 1: Install Runtime Dependencies
 
-The navigation controller requires PyTorch with GPU support (CUDA) for optimal performance. Use the provided setup script to create a Python virtual environment with all necessary dependencies:
+Choose the appropriate ONNX Runtime package based on your hardware:
+
+#### For CPU-only Deployment (Jetson, ARM, or no GPU)
 
 ```bash
-# Navigate to repository root
-cd ~/sru_ws/src/sru-robot-deployment
-
-# Run setup script (creates 'ros2_torch' virtual environment in home folder)
-bash setup_ros2_torch.sh
+pip install numpy scipy opencv-python onnxruntime
 ```
 
-**What the setup script does:**
-- Creates a Python virtual environment named `ros2_torch` in `~/ros2_torch`
-- Detects GPU availability and installs appropriate PyTorch version
-  - **With GPU**: PyTorch with CUDA 12.1 or CUDA 11.8 support
-  - **Without GPU**: CPU-only PyTorch (slower inference)
-- Installs required dependencies: numpy, scipy, opencv-python, pyyaml
-- Verifies PyTorch installation and GPU availability
+#### For GPU Deployment (NVIDIA CUDA)
 
-**After setup:**
 ```bash
-# Activate the environment
-source ~/ros2_torch/bin/activate
-
-# Source ROS 2
-source /opt/ros/jazzy/setup.bash
-
-# Verify PyTorch installation
-python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
+pip install numpy scipy opencv-python onnxruntime-gpu
 ```
 
-### Build Instructions
+**Note:** ONNX Runtime automatically detects CUDA availability. If GPU is available, it will use CUDA; otherwise, it falls back to CPU.
+
+#### Verify Installation
+
+```bash
+python -c "import onnxruntime as ort; print('Providers:', ort.get_available_providers())"
+```
+
+Expected output:
+- **With GPU**: `['CUDAExecutionProvider', 'CPUExecutionProvider']`
+- **CPU only**: `['CPUExecutionProvider']`
+
+### Step 2: Build ROS 2 Package
 
 ```bash
 # Navigate to workspace
 cd ~/sru_ws
 
-# Build package (without symlink install for working with virtual env)
+# Build package
 colcon build --packages-select rl_nav_controller --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 # Source workspace
@@ -113,18 +113,10 @@ source install/setup.bash
 
 ### Launch Navigation Controller
 
-**Important:** Always activate the Python environment before launching:
-```bash
-# Activate virtual environment
-source ~/ros2_torch/bin/activate
-
-# Source ROS 2 and workspace
-source /opt/ros/jazzy/setup.bash
-source ~/sru_ws/install/setup.bash
-```
-
 **For real hardware:**
 ```bash
+source /opt/ros/jazzy/setup.bash
+source ~/sru_ws/install/setup.bash
 ros2 launch rl_nav_controller rl_nav_controller.launch.py
 ```
 
@@ -137,6 +129,12 @@ ros2 launch rl_nav_controller rl_nav_controller.launch.py sim:=true
 ```bash
 ros2 launch rl_nav_controller rl_nav_controller.launch.py launch_zed:=true
 ```
+
+### Verify Inference Device
+
+When the node starts, you should see one of:
+- `Using device: CUDA (ONNX Runtime)` - GPU acceleration active
+- `Using device: CPU (ONNX Runtime)` - CPU inference (still fast enough for 5 Hz)
 
 ### Send Navigation Goal
 
@@ -157,13 +155,14 @@ Depth Camera (640×400) → VAE Encoder → Navigation Policy → Velocity Comma
 32FC1 Image            40×64 latent        3D output      /nav_vel topic
                                          [vx, vy, ωz]
 
-Input (60-dim):
-  ├─ Depth embedding: 64 dims (channels)
-  ├─ Target position: 4 dims (normalized + log distance)
-  ├─ Linear velocity: 3 dims
-  ├─ Angular velocity: 3 dims
-  ├─ Gravity vector: 3 dims
-  └─ Last action: 3 dims
+Policy Input (2576-dim):
+  ├─ State (16 dims):
+  │   ├─ Linear velocity: 3 dims
+  │   ├─ Angular velocity: 3 dims
+  │   ├─ Gravity vector: 3 dims
+  │   ├─ Last action: 3 dims
+  │   └─ Target position: 4 dims (normalized + log distance)
+  └─ Depth embedding: 2560 dims (VAE encoder output)
 ```
 
 ### Key Topics
@@ -310,9 +309,27 @@ SMART_JOYSTICK_SCALE = 5.0           # Smart joystick, equiv. goal distance (m)
 
 ## Troubleshooting
 
+### ONNX Models Not Found
+```
+Error: Model file not found: deployment_policies/vae_encoder.onnx
+```
+**Solution:** Ensure ONNX model files are present in `deployment_policies/`:
+- `vae_encoder.onnx`
+- `nav_policy.onnx`
+
+These models should be included in the repository. If missing, contact the repository maintainers.
+
 ### Policy Runs Slowly
-- Check GPU availability: Look for "Using device: CUDA" in console
-- Verify PyTorch CUDA: `python -c "import torch; print(torch.cuda.is_available())"`
+- Check if GPU is being used: Look for "Using device: CUDA (ONNX Runtime)" in console
+- Verify ONNX Runtime GPU support:
+  ```bash
+  python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+  ```
+- If `CUDAExecutionProvider` is not listed, install GPU version:
+  ```bash
+  pip uninstall onnxruntime
+  pip install onnxruntime-gpu
+  ```
 - Monitor depth rate: `ros2 topic hz /zed/zed_node/depth/depth_registered`
 
 ### Robot Doesn't Move
@@ -325,11 +342,21 @@ SMART_JOYSTICK_SCALE = 5.0           # Smart joystick, equiv. goal distance (m)
 - Adjust `ARRIVE_GOAL_THRESHOLD` in constants.py
 - Check visualization markers in RViz2
 
+### ONNX Runtime Import Error
+```
+ImportError: No module named 'onnxruntime'
+```
+**Solution:** Install ONNX Runtime:
+```bash
+pip install onnxruntime        # CPU only
+pip install onnxruntime-gpu    # With GPU support
+```
+
 ## Development
 
 ### Main Components
 
-1. **LearningModel** class: PyTorch model inference (VAE + policy)
+1. **LearningModel** class: ONNX Runtime model inference (VAE + policy)
 2. **NavigationPolicyNode** class: ROS 2 integration and control logic
 3. **WaypointManager** class: Waypoint recording and sequential playback
 4. **VisualizationManager** class: RViz marker publishing
@@ -339,6 +366,19 @@ SMART_JOYSTICK_SCALE = 5.0           # Smart joystick, equiv. goal distance (m)
 - `depth_callback()`: Triggers policy execution at 5 Hz
 - `generate_cmd_vel()`: Computes and publishes velocity commands
 - `joy_callback()`: Handles joystick input and mode switching
+
+### Testing Without ROS
+
+You can test ONNX model inference without ROS dependencies:
+```bash
+cd ~/sru_ws/src/sru-robot-deployment/rl_nav_controller
+python scripts/test_onnx_inference.py --model-dir deployment_policies
+```
+
+This will:
+- Test VAE encoder and policy models independently
+- Run a full inference pipeline test
+- Report inference timing (typical: <10ms total on CPU, <5ms on GPU)
 
 ## License
 
@@ -371,6 +411,6 @@ If you use this navigation controller in your research, please cite:
 
 This navigation controller is built with:
 - ROS 2 for robot middleware
-- PyTorch for deep learning inference
+- ONNX Runtime for efficient deep learning inference
 - ZedX stereo camera for depth perception
 - DLIO for robust odometry estimation

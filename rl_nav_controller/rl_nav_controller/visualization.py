@@ -1,6 +1,6 @@
-"""Visualization utilities for RL navigation controller."""
+"""Visualization utilities for RL navigation controller using NumPy."""
 
-import torch
+import numpy as np
 from rclpy.time import Time
 from geometry_msgs.msg import Point, Quaternion, Vector3
 from std_msgs.msg import Header
@@ -64,7 +64,7 @@ class VisualizationManager:
         """Publish visualization marker for target vector.
 
         Args:
-            target_vec_b: Target vector in base frame (torch tensor)
+            target_vec_b: Target vector in base frame (numpy array of shape (1, 3) or (1, 1, 3))
             robot_odom_time: Current odometry timestamp
             robot_frame_id: Robot frame ID
             publisher: Publisher for the marker
@@ -81,11 +81,14 @@ class VisualizationManager:
         marker.action = Marker.ADD
         marker.id = constants.TARGET_VECTOR_MARKER_ID
 
+        # Handle different array shapes
+        vec = target_vec_b.flatten()
+
         start_point = Point(x=0.0, y=0.0, z=0.0)
         end_point = Point(
-            x=target_vec_b[0, 0].item(),
-            y=target_vec_b[0, 1].item(),
-            z=target_vec_b[0, 2].item()
+            x=float(vec[0]),
+            y=float(vec[1]),
+            z=float(vec[2])
         )
         marker.points = [start_point, end_point]
 
@@ -114,15 +117,15 @@ class VisualizationManager:
         if robot_pos_w is None or map_frame_id is None:
             return
 
-        robot_pos = torch.tensor(robot_pos_w, dtype=torch.float32)
-        robot_ori = torch.tensor(robot_orientation_w, dtype=torch.float32)
+        robot_pos = np.array(robot_pos_w, dtype=np.float32)
+        robot_ori = np.array(robot_orientation_w, dtype=np.float32)
         robot_yaw_ori = yaw_quat(robot_ori)
-        moving_goal_pos = torch.tensor(moving_goal_delta, dtype=torch.float32)
+        moving_goal_pos = np.array(moving_goal_delta, dtype=np.float32)
 
         moving_goal_pos_w = transform_points(
-            moving_goal_pos.unsqueeze(0),
-            robot_pos.unsqueeze(0),
-            robot_yaw_ori.unsqueeze(0)
+            moving_goal_pos[np.newaxis],
+            robot_pos[np.newaxis],
+            robot_yaw_ori[np.newaxis]
         )
 
         marker = Marker()
@@ -135,14 +138,14 @@ class VisualizationManager:
         marker.id = constants.MOVING_GOAL_MARKER_ID
 
         start_point = Point(
-            x=moving_goal_pos_w[0, 0].item(),
-            y=moving_goal_pos_w[0, 1].item(),
-            z=moving_goal_pos_w[0, 2].item() + 1.0
+            x=float(moving_goal_pos_w[0, 0]),
+            y=float(moving_goal_pos_w[0, 1]),
+            z=float(moving_goal_pos_w[0, 2]) + 1.0
         )
         end_point = Point(
-            x=moving_goal_pos_w[0, 0].item(),
-            y=moving_goal_pos_w[0, 1].item(),
-            z=moving_goal_pos_w[0, 2].item()
+            x=float(moving_goal_pos_w[0, 0]),
+            y=float(moving_goal_pos_w[0, 1]),
+            z=float(moving_goal_pos_w[0, 2])
         )
         marker.points = [start_point, end_point]
 

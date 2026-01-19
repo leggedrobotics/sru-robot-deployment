@@ -1,11 +1,11 @@
-"""RL Navigation Controller - Main module for autonomous robot navigation."""
+"""RL Navigation Controller - Main module for autonomous robot navigation using ONNX Runtime."""
 
 import os
 import time
 import argparse
 
 import numpy as np
-import torch
+import onnxruntime as ort
 import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
@@ -19,6 +19,8 @@ from visualization_msgs.msg import Marker
 from cv_bridge import CvBridge
 from scipy.spatial.transform import Rotation as R
 
+import cv2
+
 from ament_index_python.packages import get_package_share_directory
 
 from rl_nav_controller.utils import subtract_frame_transforms, transform_points, yaw_quat
@@ -28,63 +30,154 @@ from rl_nav_controller.waypoint_manager import WaypointManager
 
 
 # --------------------------------------------------------------------------------
-# Learning model - RL Navigation Controller
+# Learning model - RL Navigation Controller (ONNX Runtime)
 # --------------------------------------------------------------------------------
+
+# Model architecture constants
+STATE_DIM = 16  # linear_vel(3) + angular_vel(3) + gravity(3) + last_action(3) + target_pos_log(4)
+DEPTH_EMBEDDING_DIM = 2560  # 64 * 5 * 8 (flattened VAE output)
+POLICY_INPUT_DIM = STATE_DIM + DEPTH_EMBEDDING_DIM  # 2576
+LSTM_HIDDEN_DIM = 512
+
+
 class LearningModel:
-    """Neural network model for RL-based navigation policy."""
+    """Neural network model for RL-based navigation policy using ONNX Runtime.
+
+    Model Architecture:
+        VAE Encoder:
+            - Input: depth_image [batch, 1, 40, 64]
+            - Output: mu [batch, 64, 5, 8] -> flattened to 2560
+
+        Navigation Policy (LSTM-based):
+            - Inputs:
+                - obs: [batch, 2576] (16 state features + 2560 depth embedding)
+                - h_in: [1, batch, 512] (LSTM hidden state)
+                - c_in: [1, batch, 512] (LSTM cell state)
+            - Outputs:
+                - actions: [batch, 3]
+                - h_out: [1, batch, 512]
+                - c_out: [1, batch, 512]
+    """
 
     def __init__(self, preprocess_model_path, policy_model_path):
         """Initialize learning model with preprocessing and policy networks.
 
         Args:
-            preprocess_model_path: Path to depth image preprocessing model
-            policy_model_path: Path to navigation policy model
+            preprocess_model_path: Path to depth image preprocessing model (.onnx)
+            policy_model_path: Path to navigation policy model (.onnx)
         """
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        if torch.cuda.is_available():
-            print('\033[92m' + 'Using device: CUDA' + '\033[0m')
+        # Determine available execution providers
+        available_providers = ort.get_available_providers()
+
+        # Prefer CUDA if available, otherwise use CPU
+        if 'CUDAExecutionProvider' in available_providers:
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            print('\033[92m' + 'Using device: CUDA (ONNX Runtime)' + '\033[0m')
         else:
-            print('\033[93m' + 'Using device: CPU' + '\033[0m')
+            providers = ['CPUExecutionProvider']
+            print('\033[93m' + 'Using device: CPU (ONNX Runtime)' + '\033[0m')
 
-        self.preprocess_model = torch.jit.load(preprocess_model_path).to(self.device)
-        self.policy_model = torch.jit.load(policy_model_path).to(self.device)
+        # Session options for optimization
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.intra_op_num_threads = 4
 
-        self.preprocess_model = torch.jit.optimize_for_inference(self.preprocess_model.eval())
-        self.policy_model = torch.jit.optimize_for_inference(self.policy_model.eval())
+        # Load ONNX models
+        self.preprocess_session = ort.InferenceSession(
+            preprocess_model_path, sess_options=sess_options, providers=providers
+        )
+        self.policy_session = ort.InferenceSession(
+            policy_model_path, sess_options=sess_options, providers=providers
+        )
 
-        self._policy_scale = torch.tensor(
-            constants.POLICY_SCALE, dtype=torch.float32
-        ).to(self.device)
+        # Get input/output names for the models
+        self.preprocess_input_name = self.preprocess_session.get_inputs()[0].name
+        self.preprocess_output_name = self.preprocess_session.get_outputs()[0].name
+
+        # Policy model has 3 inputs: obs, h_in, c_in
+        # and 3 outputs: actions, h_out, c_out
+        self.policy_input_names = {inp.name: inp for inp in self.policy_session.get_inputs()}
+        self.policy_output_names = [out.name for out in self.policy_session.get_outputs()]
+
+        # Initialize LSTM hidden states
+        self._h_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
+        self._c_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
+
+        # Policy output scaling
+        self._policy_scale = np.array(constants.POLICY_SCALE, dtype=np.float32)
 
         # Warm up model with a fake run
         self.fake_run_once()
 
-        print('\033[92m' + 'Learning model is ready.' + '\033[0m')
+        print('\033[92m' + 'Learning model is ready (ONNX Runtime).' + '\033[0m')
 
-    @torch.inference_mode()
-    def depth_preprocess(self, img: np.ndarray):
-        img_tensor = torch.tensor(img, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)
-        img_tensor = torch.nn.functional.interpolate(img_tensor, size=(40, 64), mode='bilinear', align_corners=True)
-        processed_img = self.preprocess_model(img_tensor)
-        return processed_img
+    def _resize_bilinear(self, img: np.ndarray, target_size: tuple) -> np.ndarray:
+        """Resize image using bilinear interpolation.
 
-    @torch.inference_mode()
+        Args:
+            img: Input image of shape (H, W)
+            target_size: Target size (H, W)
+
+        Returns:
+            Resized image of shape (target_H, target_W)
+        """
+        # cv2.resize expects (width, height), so we reverse target_size
+        return cv2.resize(img, (target_size[1], target_size[0]), interpolation=cv2.INTER_LINEAR)
+
+    def depth_preprocess(self, img: np.ndarray) -> np.ndarray:
+        """Process depth image through the VAE encoder.
+
+        Args:
+            img: Depth image of shape (H, W)
+
+        Returns:
+            Flattened latent embedding of shape (2560,)
+        """
+        # Resize to (40, 64) using bilinear interpolation
+        img_resized = self._resize_bilinear(img, (40, 64))
+
+        # Add batch and channel dimensions: (H, W) -> (1, 1, H, W)
+        img_tensor = img_resized.astype(np.float32)[np.newaxis, np.newaxis, :, :]
+
+        # Run inference - output is [batch, 64, 5, 8]
+        vae_output = self.preprocess_session.run(
+            [self.preprocess_output_name],
+            {self.preprocess_input_name: img_tensor}
+        )[0]
+
+        # Flatten the output: [1, 64, 5, 8] -> [2560]
+        return vae_output.flatten()
+
     def normalize_target_position(self, target_pos_w, robot_pos_w, robot_orientation_w):
-        target_pos_w = torch.tensor(target_pos_w, dtype=torch.float32).unsqueeze(0).to(self.device)
-        robot_pos_w = torch.tensor(robot_pos_w, dtype=torch.float32).unsqueeze(0).to(self.device)
-        robot_orientation_w = torch.tensor(robot_orientation_w, dtype=torch.float32).unsqueeze(0).to(self.device)
+        """Normalize target position relative to robot frame.
+
+        Args:
+            target_pos_w: Target position in world frame [x, y, z]
+            robot_pos_w: Robot position in world frame [x, y, z]
+            robot_orientation_w: Robot orientation quaternion [w, x, y, z]
+
+        Returns:
+            Tuple of (normalized target position with log distance, target vector in base frame)
+        """
+        target_pos_w = np.array(target_pos_w, dtype=np.float32)[np.newaxis]
+        robot_pos_w = np.array(robot_pos_w, dtype=np.float32)[np.newaxis]
+        robot_orientation_w = np.array(robot_orientation_w, dtype=np.float32)[np.newaxis]
 
         inv_pos, inv_rot = subtract_frame_transforms(robot_pos_w, robot_orientation_w)
         target_vec_b = transform_points(target_pos_w, inv_pos, inv_rot)
 
-        dist = target_vec_b.norm(dim=-1, keepdim=True) + 1e-6
+        dist = np.linalg.norm(target_vec_b, axis=-1, keepdims=True) + 1e-6
         target_pos = target_vec_b / dist
-        dist_log = torch.log(dist + 1.0)
+        dist_log = np.log(dist + 1.0)
 
-        target_pos = torch.cat((target_pos, dist_log), dim=-1).view(-1)
+        target_pos = np.concatenate((target_pos, dist_log), axis=-1).reshape(-1)
         return target_pos, target_vec_b
 
-    @torch.inference_mode()
+    def reset_hidden_state(self):
+        """Reset the LSTM hidden states to zeros."""
+        self._h_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
+        self._c_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
+
     def predict(
         self,
         linear_vel,
@@ -97,26 +190,71 @@ class LearningModel:
         depth_image,
         is_reset=False
     ):
-        processed_embedding = self.depth_preprocess(depth_image)
-        processed_embedding = processed_embedding.view(-1)
+        """Run policy inference to get velocity command.
 
+        Args:
+            linear_vel: Linear velocity in base frame [vx, vy, vz]
+            angular_vel: Angular velocity in base frame [wx, wy, wz]
+            gravity_vector: Gravity vector in base frame [gx, gy, gz]
+            last_action: Previous action [vx, vy, wz]
+            target_pos_w: Target position in world frame
+            robot_pos_w: Robot position in world frame
+            robot_orientation_w: Robot orientation quaternion [w, x, y, z]
+            depth_image: Depth image array
+            is_reset: Whether to reset hidden state
+
+        Returns:
+            Tuple of (velocity command, raw action, target vector in base frame)
+        """
+        # Reset hidden state if requested
+        if is_reset:
+            self.reset_hidden_state()
+
+        # Preprocess depth image - returns flattened embedding of shape (2560,)
+        depth_embedding = self.depth_preprocess(depth_image)
+
+        # Normalize target position
         target_pos_log, target_vec_b = self.normalize_target_position(
             target_pos_w, robot_pos_w, robot_orientation_w
         )
 
-        input_tensor = torch.tensor(linear_vel + angular_vel + gravity_vector + last_action,
-                                    dtype=torch.float32).to(self.device)
-        combined_input = torch.cat((input_tensor, target_pos_log, processed_embedding), dim=0).unsqueeze(0)
-        raw_action = self.policy_model(combined_input, is_reset)
+        # Assemble state input tensor
+        # State: linear_vel(3) + angular_vel(3) + gravity(3) + last_action(3) + target_pos_log(4) = 16
+        state_input = np.array(
+            linear_vel + angular_vel + gravity_vector + last_action + target_pos_log.tolist(),
+            dtype=np.float32
+        )
 
-        cmd_vel_tensor = torch.tanh(raw_action) * self._policy_scale
-        cmd_vel = cmd_vel_tensor.squeeze(0).cpu().numpy()
-        raw_action = raw_action.squeeze(0).cpu().numpy()
+        # Combine state and depth embedding: [16] + [2560] = [2576]
+        obs = np.concatenate([state_input, depth_embedding])[np.newaxis].astype(np.float32)
+
+        # Run policy inference with LSTM states
+        # Inputs: obs [1, 2576], h_in [1, 1, 512], c_in [1, 1, 512]
+        # Outputs: actions [1, 3], h_out [1, 1, 512], c_out [1, 1, 512]
+        outputs = self.policy_session.run(
+            None,
+            {
+                'obs': obs,
+                'h_in': self._h_state,
+                'c_in': self._c_state
+            }
+        )
+
+        raw_action, h_out, c_out = outputs
+
+        # Update LSTM hidden states for next iteration
+        self._h_state = h_out
+        self._c_state = c_out
+
+        # Apply tanh and scaling
+        cmd_vel = np.tanh(raw_action) * self._policy_scale
+        cmd_vel = cmd_vel.squeeze(0)
+        raw_action = raw_action.squeeze(0)
 
         return cmd_vel, raw_action, target_vec_b
 
-    @torch.inference_mode()
     def fake_run_once(self):
+        """Warm up the model with a dummy inference."""
         linear_vel = [0.0, 0.0, 0.0]
         angular_vel = [0.0, 0.0, 0.0]
         gravity_vector = [0.0, 0.0, -1.0]
@@ -124,7 +262,7 @@ class LearningModel:
         robot_pos_w = [0.0, 0.0, 0.0]
         robot_orientation_w = [1.0, 0.0, 0.0, 0.0]
         last_action = [0.0, 0.0, 0.0]
-        depth_image = np.random.rand(600, 960)
+        depth_image = np.random.rand(600, 960).astype(np.float32)
 
         cmd_vel, _, _ = self.predict(
             linear_vel,
@@ -134,10 +272,14 @@ class LearningModel:
             target_pos_w,
             robot_pos_w,
             robot_orientation_w,
-            depth_image
+            depth_image,
+            is_reset=True  # Reset hidden state for warmup
         )
         print(f'Predicted cmd_vel: linear_x={cmd_vel[0]:.4f}, '
               f'linear_y={cmd_vel[1]:.4f}, angular_z={cmd_vel[2]:.4f}')
+
+        # Reset hidden state after warmup so it's clean for actual use
+        self.reset_hidden_state()
 
 
 # --------------------------------------------------------------------------------
@@ -277,7 +419,7 @@ class NavigationPolicyNode(Node):
         Args:
             odom_msg: Odometry message from the localization system
         """
-        # 1) Update “time” from odom header
+        # 1) Update "time" from odom header
         self.robot_odom_time = odom_msg.header.stamp.sec + odom_msg.header.stamp.nanosec * 1e-9
 
         # 2) Frame IDs (once)
@@ -319,7 +461,7 @@ class NavigationPolicyNode(Node):
             self.linear_vel = self.convert_vel_frame(self.linear_vel_w, self.robot_orientation_w)
             self.angular_vel = self.convert_vel_frame(self.angular_vel_w, self.robot_orientation_w)
 
-        # 6) Publish “converted” base velocity
+        # 6) Publish "converted" base velocity
         self.publish_base_vel(self.linear_vel, self.angular_vel)
 
         # 7) Compute projected gravity vector in base frame
@@ -335,7 +477,7 @@ class NavigationPolicyNode(Node):
         Args:
             depth_msg: Depth image from the camera
         """
-        # 1) Don’t proceed until odometry has come in at least once
+        # 1) Don't proceed until odometry has come in at least once
         if not self.odom_ready:
             self.get_logger().warn('\033[93m' + 'Odometry not ready, skipping depth callback.' + '\033[0m')
             return
@@ -459,7 +601,7 @@ class NavigationPolicyNode(Node):
         self._reset_joystick()
 
     # ------------------------------
-    # “Base‐frame” velocity publisher (called from odom_callback)
+    # "Base‐frame" velocity publisher (called from odom_callback)
     # ------------------------------
     def publish_base_vel(self, linear_vel, angular_vel):
         twist = Twist()
@@ -576,7 +718,7 @@ class NavigationPolicyNode(Node):
             self.get_logger().warn('Force Reset hidden state')
 
         self.joy_time = time.time()
-        
+
     def _generate_waypoint_using_joystick(self, linear_x, linear_y, linear_z):
         """Generate a waypoint using joystick inputs relative to robot's current position.
 
@@ -592,21 +734,21 @@ class NavigationPolicyNode(Node):
             return
 
         # Scale joystick inputs to goal offset in robot frame
-        goal_offset_robot = torch.tensor([
+        goal_offset_robot = np.array([
             linear_x * constants.SMART_JOYSTICK_SCALE,
             linear_y * constants.SMART_JOYSTICK_SCALE,
             linear_z * constants.SMART_JOYSTICK_SCALE * constants.SMART_JOYSTICK_Z_SCALE
-        ], dtype=torch.float32)
+        ], dtype=np.float32)
 
         # Transform the offset from robot frame to world frame
-        robot_ori = torch.tensor(self.robot_orientation_w, dtype=torch.float32)
+        robot_ori = np.array(self.robot_orientation_w, dtype=np.float32)
         robot_yaw_ori = yaw_quat(robot_ori)
 
         # Transform the offset (rotation only, no translation)
         goal_offset_world = transform_points(
-            goal_offset_robot.unsqueeze(0),
-            torch.zeros(3, dtype=torch.float32).unsqueeze(0),  # Zero translation
-            robot_yaw_ori.unsqueeze(0)
+            goal_offset_robot[np.newaxis],
+            np.zeros(3, dtype=np.float32)[np.newaxis],  # Zero translation
+            robot_yaw_ori[np.newaxis]
         )[0]
 
         # Calculate target goal as robot position + offset (always relative to current position)
@@ -644,7 +786,7 @@ class NavigationPolicyNode(Node):
         """Reset smart joystick goal state to origin."""
         self.smart_joystick_goal = [0.0, 0.0, 0.0]
         self.prev_smart_joystick_goal = [0.0, 0.0, 0.0]
-        
+
 
     def _moving_xyz_with_buttons(self, joy_msg: Joy, scale=1.0):
         """Map discrete button presses to movement increments.
@@ -685,16 +827,16 @@ class NavigationPolicyNode(Node):
             self.get_logger().warn('Cannot publish moving goal: robot pose/orientation not yet set.')
             return
 
-        robot_pos = torch.tensor(self.robot_pos_w, dtype=torch.float32)
-        robot_ori = torch.tensor(self.robot_orientation_w, dtype=torch.float32)
+        robot_pos = np.array(self.robot_pos_w, dtype=np.float32)
+        robot_ori = np.array(self.robot_orientation_w, dtype=np.float32)
         robot_yaw_ori = yaw_quat(robot_ori)
 
-        moving_goal_pos = torch.tensor(self.moving_goal_delta, dtype=torch.float32)
+        moving_goal_pos = np.array(self.moving_goal_delta, dtype=np.float32)
         # Transform robot-frame delta to world-frame coordinate
         moving_goal_pos_w = transform_points(
-            moving_goal_pos.unsqueeze(0),
-            robot_pos.unsqueeze(0),
-            robot_yaw_ori.unsqueeze(0)
+            moving_goal_pos[np.newaxis],
+            robot_pos[np.newaxis],
+            robot_yaw_ori[np.newaxis]
         )
 
         # Publish the world-frame goal
@@ -889,10 +1031,10 @@ def main(args=None):
 
     pkg_name = 'rl_nav_controller'
     pkg_path = get_package_share_directory(pkg_name)
-    preprocess_model_path = os.path.join(pkg_path, 'deployment_policies', 'vae_pretrain_new_jit.pt')
-    policy_model_path = os.path.join(pkg_path, 'deployment_policies', 'nav_policy_new.pt')
+    preprocess_model_path = os.path.join(pkg_path, 'deployment_policies', 'vae_encoder.onnx')
+    policy_model_path = os.path.join(pkg_path, 'deployment_policies', 'nav_policy.onnx')
 
-    navigation_policy_node = NavigationPolicyNode( 
+    navigation_policy_node = NavigationPolicyNode(
         preprocess_model_path=preprocess_model_path,
         policy_model_path=policy_model_path,
         min_depth=0.25,
